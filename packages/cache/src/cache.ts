@@ -1,4 +1,5 @@
 import * as core from '@actions/core'
+import {S3ClientConfig} from '@aws-sdk/client-s3'
 import * as path from 'path'
 import * as utils from './internal/cacheUtils'
 import * as cacheHttpClient from './internal/cacheHttpClient'
@@ -59,14 +60,18 @@ export function isFeatureAvailable(): boolean {
  * @param paths a list of file paths to restore from the cache
  * @param primaryKey an explicit key for restoring the cache
  * @param restoreKeys an optional ordered list of keys to use for restoring the cache if no cache hit occurred for key
- * @param downloadOptions cache download options
+ * @param options cache download options
+ * @param s3Options upload options for AWS S3
+ * @param s3BucketName a name of AWS S3 bucket
  * @returns string returns the key for the cache hit, otherwise returns undefined
  */
 export async function restoreCache(
   paths: string[],
   primaryKey: string,
   restoreKeys?: string[],
-  options?: DownloadOptions
+  options?: DownloadOptions,
+  s3Options?: S3ClientConfig,
+  s3BucketName?: string
 ): Promise<string | undefined> {
   checkPaths(paths)
 
@@ -89,11 +94,17 @@ export async function restoreCache(
   let archivePath = ''
   try {
     // path are needed to compute version
-    const cacheEntry = await cacheHttpClient.getCacheEntry(keys, paths, {
-      compressionMethod
-    })
+    const cacheEntry = await cacheHttpClient.getCacheEntry(
+      keys,
+      paths,
+      {
+        compressionMethod
+      },
+      s3Options,
+      s3BucketName
+    )
 
-    if (!cacheEntry?.archiveLocation) {
+    if (!cacheEntry?.archiveLocation && !cacheEntry?.cacheKey) {
       // Cache not found
       return undefined
     }
@@ -106,9 +117,11 @@ export async function restoreCache(
 
     // Download the cache from the cache entry
     await cacheHttpClient.downloadCache(
-      cacheEntry.archiveLocation,
+      cacheEntry,
       archivePath,
-      options
+      options,
+      s3Options,
+      s3BucketName
     )
 
     if (core.isDebug()) {
@@ -152,12 +165,16 @@ export async function restoreCache(
  * @param paths a list of file paths to be cached
  * @param key an explicit key for restoring the cache
  * @param options cache upload options
+ * @param s3Options upload options for AWS S3
+ * @param s3BucketName a name of AWS S3 bucket
  * @returns number returns cacheId if the cache was saved successfully and throws an error if save fails
  */
 export async function saveCache(
   paths: string[],
   key: string,
-  options?: UploadOptions
+  options?: UploadOptions,
+  s3Options?: S3ClientConfig,
+  s3BucketName?: string
 ): Promise<number> {
   checkPaths(paths)
   checkKey(key)
@@ -201,33 +218,42 @@ export async function saveCache(
       )
     }
 
-    core.debug('Reserving Cache')
-    const reserveCacheResponse = await cacheHttpClient.reserveCache(
-      key,
-      paths,
-      {
-        compressionMethod,
-        cacheSize: archiveFileSize
-      }
-    )
+    if (!(s3Options && s3BucketName)) {
+      core.debug('Reserving Cache')
+      const reserveCacheResponse = await cacheHttpClient.reserveCache(
+        key,
+        paths,
+        {
+          compressionMethod,
+          cacheSize: archiveFileSize
+        }
+      )
 
-    if (reserveCacheResponse?.result?.cacheId) {
-      cacheId = reserveCacheResponse?.result?.cacheId
-    } else if (reserveCacheResponse?.statusCode === 400) {
-      throw new Error(
-        reserveCacheResponse?.error?.message ??
-          `Cache size of ~${Math.round(
-            archiveFileSize / (1024 * 1024)
-          )} MB (${archiveFileSize} B) is over the data cap limit, not saving cache.`
-      )
-    } else {
-      throw new ReserveCacheError(
-        `Unable to reserve cache with key ${key}, another job may be creating this cache. More details: ${reserveCacheResponse?.error?.message}`
-      )
+      if (reserveCacheResponse?.result?.cacheId) {
+        cacheId = reserveCacheResponse?.result?.cacheId
+      } else if (reserveCacheResponse?.statusCode === 400) {
+        throw new Error(
+          reserveCacheResponse?.error?.message ??
+            `Cache size of ~${Math.round(
+              archiveFileSize / (1024 * 1024)
+            )} MB (${archiveFileSize} B) is over the data cap limit, not saving cache.`
+        )
+      } else {
+        throw new ReserveCacheError(
+          `Unable to reserve cache with key ${key}, another job may be creating this cache. More details: ${reserveCacheResponse?.error?.message}`
+        )
+      }
     }
 
     core.debug(`Saving Cache (ID: ${cacheId})`)
-    await cacheHttpClient.saveCache(cacheId, archivePath, options)
+    await cacheHttpClient.saveCache(
+      cacheId,
+      archivePath,
+      key,
+      options,
+      s3Options,
+      s3BucketName
+    )
   } catch (error) {
     const typedError = error as Error
     if (typedError.name === ValidationError.name) {
