@@ -254,6 +254,9 @@ export async function saveCache(
       s3Options,
       s3BucketName
     )
+    if (s3Options && s3BucketName) {
+      cacheId = 0; // return != -1 indicate saveCache success
+    }
   } catch (error) {
     const typedError = error as Error
     if (typedError.name === ValidationError.name) {
