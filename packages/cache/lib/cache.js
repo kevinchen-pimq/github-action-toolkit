@@ -187,6 +187,9 @@ function saveCache(paths, key, options, s3Options, s3BucketName) {
             }
             core.debug(`Saving Cache (ID: ${cacheId})`);
             yield cacheHttpClient.saveCache(cacheId, archivePath, key, options, s3Options, s3BucketName);
+            if (s3Options && s3BucketName) {
+                cacheId = 0; // return != -1 indicate saveCache success
+            }
         }
         catch (error) {
             const typedError = error;
