@@ -120,8 +120,12 @@ async function getCacheEntryS3(
 
   const contents: _content[] = []
   let hasNext = true
+  let continuationToken: string | undefined = undefined
 
   while (hasNext) {
+    if (continuationToken) {
+      param.ContinuationToken = continuationToken
+    }
     const response = await s3client.send(new ListObjectsV2Command(param))
     if (!response.Contents) {
       throw new Error(`Cannot found object in bucket ${s3BucketName}`)
@@ -138,6 +142,7 @@ async function getCacheEntryS3(
     }
 
     hasNext = response.IsTruncated ?? false
+    continuationToken = response.NextContinuationToken;
 
     response.Contents.map((obj: _Object) =>
       contents.push({
