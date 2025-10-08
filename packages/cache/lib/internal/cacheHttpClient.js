@@ -1,23 +1,4 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -27,8 +8,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) result[k] = mod[k];
+    result["default"] = mod;
+    return result;
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.saveCache = exports.reserveCache = exports.downloadCache = exports.getCacheEntry = exports.getCacheVersion = void 0;
 const core = __importStar(require("@actions/core"));
 const http_client_1 = require("@actions/http-client");
 const auth_1 = require("@actions/http-client/lib/auth");
@@ -81,94 +68,61 @@ function getCacheVersion(paths, compressionMethod) {
 }
 exports.getCacheVersion = getCacheVersion;
 function getCacheEntryS3(s3Options, s3BucketName, keys) {
-    var _a;
     return __awaiter(this, void 0, void 0, function* () {
-        const primaryKey = keys[0];
         const s3client = new client_s3_1.S3Client(s3Options);
-        const param = {
-            Bucket: s3BucketName
-        };
-        const contents = [];
-        let hasNext = true;
-        let continuationToken = undefined;
-        while (hasNext) {
-            if (continuationToken) {
-                param.ContinuationToken = continuationToken;
-            }
-            const response = yield s3client.send(new client_s3_1.ListObjectsV2Command(param));
-            if (!response.Contents) {
-                throw new Error(`Cannot found object in bucket ${s3BucketName}`);
-            }
-            const found = response.Contents.find((content) => content.Key === primaryKey);
-            if (found && found.LastModified) {
+        const primaryKey = keys[0];
+        try {
+            const headObjectResponse = yield s3client.send(new client_s3_1.HeadObjectCommand({ Bucket: s3BucketName, Key: primaryKey }));
+            if (headObjectResponse.LastModified) {
                 return {
                     cacheKey: primaryKey,
-                    creationTime: found.LastModified.toString()
+                    creationTime: headObjectResponse.LastModified.toString()
                 };
             }
-            hasNext = (_a = response.IsTruncated) !== null && _a !== void 0 ? _a : false;
-            continuationToken = response.NextContinuationToken;
-            response.Contents.map((obj) => contents.push({
-                Key: obj.Key,
-                LastModified: obj.LastModified
-            }));
         }
-        // not found in primary key, So fallback to next keys
-        const notPrimaryKey = keys.slice(1);
-        const found = searchRestoreKeyEntry(notPrimaryKey, contents);
-        if (found != null && found.LastModified) {
-            return {
-                cacheKey: found.Key,
-                creationTime: found.LastModified.toString()
-            };
+        catch (e) {
+            core.debug(`Error checking cache for key ${primaryKey}: ${e}`);
+        }
+        const restoreKeys = keys.slice(1);
+        if (restoreKeys.length === 0) {
+            return null;
+        }
+        for (const restoreKey of restoreKeys) {
+            let continuationToken = undefined;
+            const allContents = [];
+            while (true) {
+                const response = yield s3client.send(new client_s3_1.ListObjectsV2Command({
+                    Bucket: s3BucketName,
+                    Prefix: restoreKey,
+                    ContinuationToken: continuationToken
+                }));
+                if (response.Contents) {
+                    allContents.push(...response.Contents);
+                }
+                if (response.IsTruncated) {
+                    continuationToken = response.NextContinuationToken;
+                }
+                else {
+                    break;
+                }
+            }
+            if (allContents.length > 0) {
+                allContents.sort((a, b) => {
+                    if (a.LastModified && b.LastModified) {
+                        return b.LastModified.getTime() - a.LastModified.getTime();
+                    }
+                    return 0;
+                });
+                if (allContents[0].Key && allContents[0].LastModified) {
+                    return {
+                        cacheKey: allContents[0].Key,
+                        creationTime: allContents[0].LastModified.toString()
+                    };
+                }
+            }
         }
         return null;
     });
-}
-function searchRestoreKeyEntry(notPrimaryKey, entries) {
-    for (const k of notPrimaryKey) {
-        const found = _searchRestoreKeyEntry(k, entries);
-        if (found != null) {
-            return found;
-        }
-    }
-    return null;
-}
-function _searchRestoreKeyEntry(notPrimaryKey, entries) {
-    var _a;
-    const matchPrefix = [];
-    for (const entry of entries) {
-        if (entry.Key === notPrimaryKey) {
-            // extractly match, Use this entry
-            return entry;
-        }
-        if ((_a = entry.Key) === null || _a === void 0 ? void 0 : _a.startsWith(notPrimaryKey)) {
-            matchPrefix.push(entry);
-        }
-    }
-    if (matchPrefix.length === 0) {
-        // not found, go to next key
-        return null;
-    }
-    matchPrefix.sort(function (i, j) {
-        var _a, _b, _c, _d, _e, _f;
-        // eslint-disable-next-line eqeqeq
-        if (i.LastModified == undefined || j.LastModified == undefined) {
-            return 0;
-        }
-        if (((_a = i.LastModified) === null || _a === void 0 ? void 0 : _a.getTime()) === ((_b = j.LastModified) === null || _b === void 0 ? void 0 : _b.getTime())) {
-            return 0;
-        }
-        if (((_c = i.LastModified) === null || _c === void 0 ? void 0 : _c.getTime()) > ((_d = j.LastModified) === null || _d === void 0 ? void 0 : _d.getTime())) {
-            return -1;
-        }
-        if (((_e = i.LastModified) === null || _e === void 0 ? void 0 : _e.getTime()) < ((_f = j.LastModified) === null || _f === void 0 ? void 0 : _f.getTime())) {
-            return 1;
-        }
-        return 0;
-    });
-    // return newest entry
-    return matchPrefix[0];
 }
 function getCacheEntry(keys, paths, options, s3Options, s3BucketName) {
     return __awaiter(this, void 0, void 0, function* () {

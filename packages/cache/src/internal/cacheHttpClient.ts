@@ -149,7 +149,7 @@ async function getCacheEntryS3(
       }
 
       if (response.IsTruncated) {
-        continuationToken = response.NextContinuationToken
+        continuationToken = response.NextContinuationToken as string
       } else {
         break
       }
