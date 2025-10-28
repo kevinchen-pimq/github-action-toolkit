@@ -6,8 +6,8 @@ import {
   TypedResponse
 } from '@actions/http-client/lib/interfaces'
 import {
+  HeadObjectCommand,
   ListObjectsV2Command,
-  ListObjectsV2CommandInput,
   S3Client,
   S3ClientConfig,
   _Object
@@ -109,118 +109,68 @@ interface _content {
 async function getCacheEntryS3(
   s3Options: S3ClientConfig,
   s3BucketName: string,
-  keys: string[],
+  keys: string[]
 ): Promise<ArtifactCacheEntry | null> {
-  const primaryKey = keys[0]
-
   const s3client = new S3Client(s3Options)
-  const param = {
-    Bucket: s3BucketName
-  } as ListObjectsV2CommandInput
-
-  const contents: _content[] = []
-  let hasNext = true
-  let continuationToken: string | undefined = undefined
-
-  while (hasNext) {
-    if (continuationToken) {
-      param.ContinuationToken = continuationToken
-    }
-    const response = await s3client.send(new ListObjectsV2Command(param))
-    if (!response.Contents) {
-      throw new Error(`Cannot found object in bucket ${s3BucketName}`)
-    }
-
-    const found = response.Contents.find(
-      (content: _Object) => content.Key === primaryKey
+  const primaryKey = keys[0]
+  try {
+    const headObjectResponse = await s3client.send(
+      new HeadObjectCommand({Bucket: s3BucketName, Key: primaryKey})
     )
-    if (found && found.LastModified) {
+    if (headObjectResponse.LastModified) {
       return {
         cacheKey: primaryKey,
-        creationTime: found.LastModified.toString()
+        creationTime: headObjectResponse.LastModified.toString()
       }
     }
-
-    hasNext = response.IsTruncated ?? false
-    continuationToken = response.NextContinuationToken;
-
-    response.Contents.map((obj: _Object) =>
-      contents.push({
-        Key: obj.Key,
-        LastModified: obj.LastModified
-      })
-    )
+  } catch (e) {
+    core.debug(`Error checking cache for key ${primaryKey}: ${e}`)
   }
 
-  // not found in primary key, So fallback to next keys
-  const notPrimaryKey = keys.slice(1)
-  const found = searchRestoreKeyEntry(notPrimaryKey, contents)
-  if (found != null && found.LastModified) {
-    return {
-      cacheKey: found.Key,
-      creationTime: found.LastModified.toString()
-    }
-  }
-
-  return null
-}
-
-function searchRestoreKeyEntry(
-  notPrimaryKey: string[],
-  entries: _content[]
-): _content | null {
-  for (const k of notPrimaryKey) {
-    const found = _searchRestoreKeyEntry(k, entries)
-    if (found != null) {
-      return found
-    }
-  }
-
-  return null
-}
-
-function _searchRestoreKeyEntry(
-  notPrimaryKey: string,
-  entries: _content[]
-): _content | null {
-  const matchPrefix: _content[] = []
-
-  for (const entry of entries) {
-    if (entry.Key === notPrimaryKey) {
-      // extractly match, Use this entry
-      return entry
-    }
-
-    if (entry.Key?.startsWith(notPrimaryKey)) {
-      matchPrefix.push(entry)
-    }
-  }
-
-  if (matchPrefix.length === 0) {
-    // not found, go to next key
+  const restoreKeys = keys.slice(1)
+  if (restoreKeys.length === 0) {
     return null
   }
 
-  matchPrefix.sort(function(i, j) {
-    // eslint-disable-next-line eqeqeq
-    if (i.LastModified == undefined || j.LastModified == undefined) {
-      return 0
-    }
-    if (i.LastModified?.getTime() === j.LastModified?.getTime()) {
-      return 0
-    }
-    if (i.LastModified?.getTime() > j.LastModified?.getTime()) {
-      return -1
-    }
-    if (i.LastModified?.getTime() < j.LastModified?.getTime()) {
-      return 1
-    }
+  for (const restoreKey of restoreKeys) {
+    let continuationToken: string | undefined = undefined
+    const allContents: _Object[] = []
+    while (true) {
+      const response = await s3client.send(
+        new ListObjectsV2Command({
+          Bucket: s3BucketName,
+          Prefix: restoreKey,
+          ContinuationToken: continuationToken
+        })
+      )
 
-    return 0
-  })
+      if (response.Contents) {
+        allContents.push(...response.Contents)
+      }
 
-  // return newest entry
-  return matchPrefix[0]
+      if (response.IsTruncated) {
+        continuationToken = response.NextContinuationToken as string
+      } else {
+        break
+      }
+    }
+    if (allContents.length > 0) {
+      allContents.sort((a, b) => {
+        if (a.LastModified && b.LastModified) {
+          return b.LastModified.getTime() - a.LastModified.getTime()
+        }
+        return 0
+      })
+      if (allContents[0].Key && allContents[0].LastModified) {
+        return {
+          cacheKey: allContents[0].Key,
+          creationTime: allContents[0].LastModified.toString()
+        }
+      }
+    }
+  }
+
+  return null
 }
 
 export async function getCacheEntry(
